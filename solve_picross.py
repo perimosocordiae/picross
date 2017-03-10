@@ -39,14 +39,15 @@ def web_main(state, rows, cols):
   rows = parse_constraint(rows)
   cols = parse_constraint(cols)
   soln = solve(rows, cols)
-  width_px = 500 // soln.shape[1]
-  height_px = 500 // soln.shape[0]
+  width_px = 500 // soln.shape[1] - 1
+  height_px = 500 // soln.shape[0] - 1
   html = [
       '<style type="text/css">',
       'table { border-collapse: collapse; }',
-      'td { width: %dpx; height: %dpx; }' % (width_px, height_px),
-      '.full { background-color: black; }',
-      '.empty { background-color: gray; }',
+      'td { border: 1px solid darkgray;',
+      'width: %dpx; height: %dpx; }' % (width_px, height_px),
+      '.full { background-color: darkred; }',
+      '.empty { background-color: khaki; }',
       '</style>'
       '<table>'
   ]
