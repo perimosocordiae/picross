@@ -31,6 +31,7 @@ def main():
   elif args.row is None and args.col is None:
     if args.animate:
       ap.error('Cannot pass --animate to web UI.')
+    web_main.ocr_tpl_path = args.ocr_tpl_path
     return webtool(title='Picross', port=args.port, fn=web_main)
   if args.row is not None and args.col is not None:
     return cli_main(args.row, args.col, animate=args.animate)
@@ -69,12 +70,17 @@ def animate_solution(rows, cols, anim_secs=5, end_secs=1):
   plt.show()
 
 
-@webfn('Solve', '',
+@webfn('Solve', 'Provide either row/col constraints or an image file.',
        rows=webarg('Row constraints.', default='3,3,(3,1),5,(1,1,1)'),
-       cols=webarg('Column constraints.', default='3,2,5,(2,1),5'))
-def web_main(state, rows, cols):
-  rows = parse_constraint(rows)
-  cols = parse_constraint(cols)
+       cols=webarg('Column constraints.', default='3,2,5,(2,1),5'),
+       image=webarg('Puzzle screenshot.', type=open))
+def web_main(state, rows='', cols='', image=None):
+  if image is None:
+    rows = parse_constraint(rows)
+    cols = parse_constraint(cols)
+  else:
+    with ConstraintsDetector(web_main.ocr_tpl_path) as ocr:
+      rows, cols = ocr.detect_constraints(image)
   soln = solve(rows, cols)
   width_px = 500 // soln.shape[1] - 1
   height_px = 500 // soln.shape[0] - 1

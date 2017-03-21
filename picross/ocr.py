@@ -106,7 +106,11 @@ def _match_number(img, templates):
 
 
 def find_row_col_numbers(fpath, debug=False):
-  img = cv2.imread(fpath)
+  if hasattr(fpath, 'read'):
+    buf = np.asarray(bytearray(fpath.read()), dtype=np.uint8)
+    img = cv2.imdecode(buf, 1)
+  else:
+    img = cv2.imread(fpath)
   gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
   # invert and normalize
