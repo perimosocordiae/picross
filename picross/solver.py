@@ -50,6 +50,8 @@ def _solve_1d(known, constraints):
       new_known = arr
     else:
       new_known = np.bitwise_and(new_known, arr)
+  if new_known is None:
+    raise Exception('Unsolvable constraint: %s' % constraints)
   return new_known
 
 
