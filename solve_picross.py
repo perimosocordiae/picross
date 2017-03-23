@@ -14,8 +14,8 @@ def main():
   ap = ArgumentParser(formatter_class=ArgumentDefaultsHelpFormatter)
   ap.add_argument('--port', type=int, default=8787, help='Port for web UI.')
   ap.add_argument('--image', help='Path to screenshot of puzzle.')
-  ap.add_argument('--ocr-tpl-path', default='templates.npz',
-                  help='Path to OCR digit templates file.')
+  ap.add_argument('--ocr-model-path', default='ocr.pkl',
+                  help='Path to OCR model file.')
   ap.add_argument('--animate', action='store_true',
                   help='Use Bayesian solver to produce an animation.')
   ap.add_argument('row', nargs='?', help='Row constraints, comma-separated.')
@@ -23,15 +23,16 @@ def main():
   args = ap.parse_args()
 
   if args.image:
-    with ConstraintsDetector(args.ocr_tpl_path) as ocr:
-      rows, cols = ocr.detect_constraints(args.image)
+    ocr = ConstraintsDetector(args.ocr_model_path)
+    rows, cols = ocr.detect_constraints(args.image)
     print('Rows:', rows)
     print('Cols:', cols)
+    ocr.save_model()
     return cli_main(rows, cols, pre_parsed=True, animate=args.animate)
   elif args.row is None and args.col is None:
     if args.animate:
       ap.error('Cannot pass --animate to web UI.')
-    web_main.ocr_tpl_path = args.ocr_tpl_path
+    web_main.ocr_model_path = args.ocr_model_path
     return webtool(title='Picross', port=args.port, fn=web_main)
   if args.row is not None and args.col is not None:
     return cli_main(args.row, args.col, animate=args.animate)
@@ -79,8 +80,9 @@ def web_main(state, rows='', cols='', image=None):
     rows = parse_constraint(rows)
     cols = parse_constraint(cols)
   else:
-    with ConstraintsDetector(web_main.ocr_tpl_path) as ocr:
-      rows, cols = ocr.detect_constraints(image)
+    ocr = ConstraintsDetector(web_main.ocr_model_path)
+    rows, cols = ocr.detect_constraints(image)
+    ocr.save_model()
   soln = solve(rows, cols)
   width_px = 500 // soln.shape[1] - 1
   height_px = 500 // soln.shape[0] - 1

@@ -2,107 +2,190 @@ from __future__ import print_function, division
 import cv2
 import numpy as np
 import scipy.ndimage
-from sklearn.metrics import pairwise_distances_argmin
+from sklearn.externals import joblib
+from sklearn.naive_bayes import GaussianNB
 
 
 class ConstraintsDetector(object):
-  def __init__(self, tpl_path):
-    self.tpl_path = tpl_path
-    self.num_templates_on_disk = 0
-    self.templates = []
-
-  def load_templates(self):
-    self.num_templates_on_disk = 0
-    self.templates = []
+  def __init__(self, model_path):
+    self.model_path = model_path
     try:
-      npz = np.load(self.tpl_path)
+      self.digit_rec = NaiveBayesDigits.load(self.model_path)
     except:
-      return
-    for key in npz.files:
-      num = int(key.split(':', 1)[0])
-      self.templates.append((num, npz[key]))
-    self.num_templates_on_disk = len(self.templates)
+      self.digit_rec = ExactLookupDigits()
 
-  def save_templates(self):
-    if self.num_templates_on_disk == len(self.templates):
-      return
-    if not self.tpl_path:
-      return
-    save_dict = {}
-    for ct, (num, tpl) in enumerate(self.templates):
-      key = '%d:%d' % (num, ct)
-      save_dict[key] = tpl
-    np.savez(self.tpl_path, **save_dict)
-    self.num_templates_on_disk = len(self.templates)
+  def save_model(self):
+    if isinstance(self.digit_rec, ExactLookupDigits):
+      digits, imgs = zip(*self.digit_rec.known_pairs)
+      self.digit_rec = NaiveBayesDigits.train(imgs, digits)
+    self.digit_rec.save(self.model_path)
 
   def detect_constraints(self, path_or_file):
     # crop to constraint areas
     col_nums, row_nums = find_row_col_numbers(path_or_file)
 
     # segment rows/cols of constraints
-    row_labels, num_rows = scipy.ndimage.label(row_nums.any(axis=1))
-    col_labels, num_cols = scipy.ndimage.label(col_nums.any(axis=0))
+    row_labels, _ = scipy.ndimage.label(row_nums.any(axis=1))
+    flat_col = col_nums.any(axis=0)
+    scipy.ndimage.binary_closing(flat_col, iterations=4, output=flat_col)
+    col_labels, _ = scipy.ndimage.label(flat_col)
 
     # parse constraints
-    row_constraints = [
-        parse_numbers(row_nums[row_labels == x,:], self.templates, horiz=True)
-        for x in range(1, num_rows+1)]
-    col_constraints = [
-        parse_numbers(col_nums[:,col_labels == x], self.templates, horiz=False)
-        for x in range(1, num_cols+1)]
+    row_constraints = [self._parse_numbers(row_nums[s[0],:], horiz=True)
+                       for s in scipy.ndimage.find_objects(row_labels)]
+    col_constraints = [self._parse_numbers(col_nums[:,s[0]], horiz=False)
+                       for s in scipy.ndimage.find_objects(col_labels)]
     return row_constraints, col_constraints
 
-  def __enter__(self):
-    self.load_templates()
-    return self
+  def _parse_numbers(self, img, horiz=True):
+    digit_labels, _ = scipy.ndimage.label(img)
+    numbers = []
+    in_2digit = False
+    for s1, s2 in scipy.ndimage.find_objects(digit_labels):
+      crop = img[s1,s2]
+      if crop.size < 30 or min(crop.shape) < 4:
+        continue
+      if horiz:
+        p1, p2 = s2.start, s1.start
+      else:
+        p1, p2 = s1.start, s2.start
+      num_digits = crop.max()
+      assert num_digits in (1, 2)  # sanity check
+      if in_2digit:
+        if not horiz:
+          p1 = numbers[-1][0]
+        in_2digit = False
+      elif num_digits == 2:
+        in_2digit = True
+      digit = self.digit_rec.recognize(crop)
+      numbers.append((p1, p2, num_digits, digit))
+    if in_2digit:
+      raise Exception('Incomplete 2-digit number: %d' % numbers[-1][-1])
+    numbers.sort()
 
-  def __exit__(self, *args):
-    self.save_templates()
+    tmp = []
+    for _, __, num_digits, digit in numbers:
+      if num_digits == 1:
+        in_2digit = False
+        tmp.append([digit])
+      elif in_2digit:
+        in_2digit = False
+        tmp[-1].append(digit)
+      else:
+        in_2digit = True
+        tmp.append([digit])
+    assert not in_2digit
+    return list(map(_digits2num, tmp))
 
 
-def parse_numbers(img, templates, horiz=True):
-  if img.max() == 0:
-    return []
-  digit_labels, num_digits = scipy.ndimage.label(img)
-  numbers = []
-  for s1, s2 in scipy.ndimage.find_objects(digit_labels):
-    crop = img[s1,s2]
-    pos = s2.start if horiz else s1.start
-    val = crop.max()
-    assert val in (1, 2)  # sanity check
-    num = _match_number(crop > 0, templates)
-    numbers.append((pos, val, num))
-  numbers.sort()
+class DigitRecognizer(object):
+  digit_shape = (8, 6)
 
-  tmp = []
-  in_2digit = False
-  for _, val, num in numbers:
-    if val == 1:
-      in_2digit = False
-      tmp.append([num])
-    elif in_2digit:
-      tmp[-1].append(num)
+  def recognize(self, img):
+    # prep the image
+    img = (img > 0).astype(float)
+    nr, nc = self.digit_shape
+    scale = (nr/img.shape[0], nc/img.shape[1])
+    img = scipy.ndimage.zoom(img, scale, order=1)
+    np.clip(img, 0, 1, out=img)
+
+    # predict
+    proba = self._predict_proba(img)
+    num = np.argmax(proba)
+
+    # check that we have reasonable confidence
+    odds = proba[num] / max(1e-12, 1 - proba[num])
+    if odds < 0.99 or not np.isfinite(odds):
+      print(proba)
+      ent = scipy.stats.entropy(proba)
+      print("Unknown digit: %.1f%% sure it's a %d (ent=%g)" % (
+            100*odds, num, ent))
+      _print_digit(img)
+      num = int(raw_input("What is it? "))
+      self._update_model(img, num)
+
+    return num
+
+
+class ExactLookupDigits(DigitRecognizer):
+  def __init__(self):
+    self.known_pairs = []
+
+  def _predict_proba(self, img):
+    proba = np.zeros(10)
+    for digit, known_img in self.known_pairs:
+      if np.allclose(img, known_img):
+        proba[digit] = 1
+        break
     else:
-      in_2digit = True
-      tmp.append([num])
-  return list(map(_digits2num, tmp))
+      proba[:] = 0.1
+    return proba
+
+  def _update_model(self, img, digit):
+    self.known_pairs.append((digit, img))
+
+
+class NaiveBayesDigits(DigitRecognizer):
+  def __init__(self, clf, dirty=True):
+    self.clf = clf
+    self.dirty = dirty
+
+  @staticmethod
+  def train(known_images, known_digits):
+    y = np.array(known_digits)
+    X = np.array(known_images).reshape((len(y), -1))
+    clf = GaussianNB().partial_fit(X, y, classes=np.arange(10))
+    return NaiveBayesDigits(clf)
+
+  @staticmethod
+  def load(path):
+    clf = joblib.load(path)
+    return NaiveBayesDigits(clf, dirty=False)
+
+  def save(self, path):
+    if self.dirty:
+      joblib.dump(self.clf, path)
+      self.dirty = False
+
+  def _predict_proba(self, img):
+    return self.clf.predict_proba(img.reshape((1, -1)))[0]
+
+  def _update_model(self, img, digit):
+    self.clf.partial_fit(img.reshape((1, -1)), [digit])
+    self.dirty = True
+
+
+class RunningMeanDigits(DigitRecognizer):
+  def __init__(self):
+    r, c = self.digit_shape
+    self.tpl_sums = np.zeros((10, r, c), dtype=float)
+    self.tpl_counts = np.zeros(10, dtype=int)
+    self.tpl_mean = self.tpl_sums.copy()
+
+  def _predict_proba(self, img):
+    dist = np.linalg.norm(self.tpl_mean - img, axis=(1, 2))
+    proba = dist.max() - dist
+    norm = proba.sum()
+    if norm > 0:
+      proba /= proba.sum()
+    return proba
+
+  def _update_model(self, img, digit):
+    self.tpl_sums[digit] += img
+    self.tpl_counts[digit] += 1
+    self.tpl_mean[digit] = self.tpl_sums[digit] / self.tpl_counts[digit]
+
+
+def _print_digit(arr):
+  chars = np.array(list(' .:#'))
+  thresh = np.array([0, 0.1, 0.5, 1])
+  for row in chars[np.searchsorted(thresh, arr)]:
+    print(''.join(row))
 
 
 def _digits2num(digits):
   # hax, but whatever
   return int(''.join(map(str, digits)))
-
-
-def _match_number(img, templates):
-  for num, tpl in templates:
-    if img.shape == tpl.shape and np.count_nonzero(img != tpl) <= 5:
-      break
-  else:
-    print("Unknown number:")
-    print(img.astype(int))
-    num = int(raw_input("What is it? "))
-    templates.append((num, img))
-  return num
 
 
 def find_row_col_numbers(fpath, debug=False):
@@ -124,58 +207,59 @@ def find_row_col_numbers(fpath, debug=False):
   edges = cv2.Canny(gray, 50, 200, apertureSize=3)
   edges = cv2.dilate(edges, None)
 
-  # find puzzle area: big square
+  # find puzzle area: axis-aligned big square
   contours = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)[1]
   squares = []
   for cnt in contours:
-    cnt_len = cv2.arcLength(cnt, True)
+    # check contour size
     cnt_area = cv2.contourArea(cnt)
-    s1 = cnt_len / 4.
-    s2 = np.sqrt(cnt_area)
-    if cnt_area < 10000 or abs(s1 - s2)/s1 > 0.01:
+    if cnt_area < 10000:
       continue
-    cnt = cv2.approxPolyDP(cnt, 0.01*cnt_len, True)
-    if len(cnt) != 4 or not cv2.isContourConvex(cnt):
+    # check if contour area matches bbox area
+    x, y, w, h = cv2.boundingRect(cnt)
+    bbox_area = w * h
+    if not (0.95 < cnt_area / bbox_area < 1.05):
       continue
-    cnt = cnt.reshape(-1, 2)
-    squares.append((s1, cnt))
+    # check squareness
+    if abs(w - h)/w > 0.01:
+      continue
+    squares.append((w, h, x, y))
+
   if not squares:
     if debug:
       cv2.imwrite('out.png', edges)
       raise Exception('No squares found in edge image: see out.png')
     raise Exception('No squares found in edge image')
-  edge_len, big_square = max(squares, key=lambda t: t[0])
-  if edge_len < min(edges.shape) / 2:
+
+  w, h, x, y = max(squares)
+  if min(w, h) < min(edges.shape) / 2:
     if debug:
-      cv2.drawContours(img, squares, -1, (0, 255, 0), 3)
+      for w, h, x, y in squares:
+        cv2.rectangle(img, (x, y), (x+w, y+h), (0, 255, 0), 2)
       cv2.imwrite('out.png', img)
       raise Exception('No big square found in edge image: see out.png')
     raise Exception('No big square found in edge image')
 
-  # crop to just the numbers areas
-  j1, i1 = big_square.min(axis=0)
-  j2, i2 = big_square.max(axis=0) + 1
-  col_nums = img[:i1+1,j1:j2]
-  row_nums = img[i1:i2,:j1+1]
+  col_nums = img[:y+1,x:x+w]
+  row_nums = img[y:y+h,:x+1]
 
-  # 1 -> single digit, 2 -> double digit, 0 -> background
+  # cv2.imwrite('col_img.png', col_nums)
+  # cv2.imwrite('row_img.png', row_nums)
   col_nums = _label_pixels(col_nums)
   row_nums = _label_pixels(row_nums)
+  # cv2.imwrite('col_lbl.png', col_nums * 127)
+  # cv2.imwrite('row_lbl.png', row_nums * 127)
   return col_nums, row_nums
 
 
 def _label_pixels(img):
-  # blue, white, yellow -> (0, 1, 2)
-  target_hues = np.deg2rad(np.array([240, 0, 60]))
-
   hsv = cv2.cvtColor(img.astype(np.float32), cv2.COLOR_BGR2HSV)
-  hue = np.deg2rad(hsv[:,:,0].ravel())
+  sat = hsv[:,:,1]
+  if not 0.3 < sat.mean() < 0.7:
+    raise Exception('Unexpected saturation distribution')
 
-  target_sincos = np.column_stack((np.sin(target_hues), np.cos(target_hues)))
-  sincos = np.column_stack((np.sin(hue), np.cos(hue)))
-  quantized = pairwise_distances_argmin(sincos, target_sincos)
-  return quantized.reshape(img.shape[:2])
-
-
-if __name__ == '__main__':
-  main()
+  # 1 -> single digit, 2 -> double digit, 0 -> background
+  lbl = np.zeros_like(sat, dtype=np.uint8)
+  lbl[sat < 0.3] = 1
+  lbl[sat > 0.7] = 2
+  return lbl
