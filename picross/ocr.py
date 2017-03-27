@@ -261,21 +261,33 @@ def find_row_col_numbers(fpath, debug=False):
 
   # cv2.imwrite('col_img.png', col_nums)
   # cv2.imwrite('row_img.png', row_nums)
-  col_nums = _label_pixels(col_nums)
-  row_nums = _label_pixels(row_nums)
+  col_nums = _label_pixels(col_nums, vertical_gradient=False)
+  row_nums = _label_pixels(row_nums, vertical_gradient=True)
   # cv2.imwrite('col_lbl.png', col_nums * 127)
   # cv2.imwrite('row_lbl.png', row_nums * 127)
   return col_nums, row_nums
 
 
-def _label_pixels(img):
+def _label_pixels(img, vertical_gradient=True):
   hsv = cv2.cvtColor(img.astype(np.float32), cv2.COLOR_BGR2HSV)
+  # look at the saturation channel
   sat = hsv[:,:,1]
-  if not 0.3 < sat.mean() < 0.7:
-    raise Exception('Unexpected saturation distribution')
+  # quantize to 10 discrete bins
+  qsat = np.digitize(sat, np.linspace(0, 1, 11)[1:])
+
+  if vertical_gradient:
+    # the background is the bin with the largest count in a given row
+    bg_sat = np.array([np.bincount(row).argmax() for row in qsat])[:,None]
+  else:
+    # the background is the bin with the largest count
+    bg_sat = np.bincount(qsat.ravel()).argmax()
 
   # 1 -> single digit, 2 -> double digit, 0 -> background
   lbl = np.zeros_like(sat, dtype=np.uint8)
-  lbl[sat < 0.3] = 1
-  lbl[sat > 0.7] = 2
+  lbl[qsat < bg_sat] = 1
+  lbl[qsat > bg_sat] = 2
+
+  # do a little cleanup: there should be background in each row and column
+  lbl -= lbl.min(axis=0, keepdims=True)
+  lbl -= lbl.min(axis=1, keepdims=True)
   return lbl
