@@ -205,10 +205,10 @@ def find_row_col_numbers(fpath, debug=False):
 
   # detect edges
   edges = cv2.Canny(gray, 50, 200, apertureSize=3)
-  edges = cv2.dilate(edges, None)
 
   # find puzzle area: axis-aligned big square
-  contours = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)[1]
+  contours = cv2.findContours(edges, cv2.RETR_EXTERNAL,
+                              cv2.CHAIN_APPROX_SIMPLE)[1]
   squares = []
   for cnt in contours:
     # check contour size
@@ -227,18 +227,34 @@ def find_row_col_numbers(fpath, debug=False):
 
   if not squares:
     if debug:
+      edges = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
+      cv2.drawContours(edges, contours, -1, (0,0,255), 3)
       cv2.imwrite('out.png', edges)
       raise Exception('No squares found in edge image: see out.png')
     raise Exception('No squares found in edge image')
 
   w, h, x, y = max(squares)
   if min(w, h) < min(edges.shape) / 2:
-    if debug:
-      for w, h, x, y in squares:
-        cv2.rectangle(img, (x, y), (x+w, y+h), (0, 255, 0), 2)
-      cv2.imwrite('out.png', img)
-      raise Exception('No big square found in edge image: see out.png')
-    raise Exception('No big square found in edge image')
+    # no single big square, but we could have many smaller ones
+    squares = np.array(squares)
+    sum_area = squares[:,0].dot(squares[:,1])
+    minx, miny = squares[:,2:].min(axis=0)
+    maxx, maxy = (squares[:,:2] + squares[:,2:]).max(axis=0)
+    bw, bh = maxx - minx, maxy - miny
+    bound_area = bw * bh
+    if 0.95 < sum_area / bound_area < 1.05:
+      w, h, x, y = bw, bh, minx, miny
+    else:
+      if debug:
+        from itertools import cycle
+        from matplotlib import colors, rcParams
+        ccycle = cycle(rcParams['axes.prop_cycle'].by_key()['color'])
+        for (w, h, x, y), color in zip(squares, ccycle):
+          r, g, b = np.array(colors.to_rgb(color)) * 255
+          cv2.rectangle(img, (x, y), (x+w, y+h), (b, g, r), cv2.FILLED)
+        cv2.imwrite('out.png', img)
+        raise Exception('No big square found in edge image: see out.png')
+      raise Exception('No big square found in edge image')
 
   col_nums = img[:y+1,x:x+w]
   row_nums = img[y:y+h,:x+1]
