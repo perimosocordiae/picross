@@ -74,7 +74,8 @@ class ConstraintsDetector(object):
       else:
         in_2digit = True
         tmp.append([digit])
-    assert not in_2digit
+    if in_2digit:
+      raise Exception('Incomplete 2-digit number: %s' % tmp)
     return list(map(_digits2num, tmp))
 
 
@@ -101,7 +102,7 @@ class DigitRecognizer(object):
       print("Unknown digit: %.1f%% sure it's a %d (ent=%g)" % (
             100*odds, num, ent))
       _print_digit(img)
-      num = int(raw_input("What is it? "))
+      num = int(input("What is it? "))
       self._update_model(img, num)
 
     return num
@@ -208,7 +209,7 @@ def find_row_col_numbers(fpath, debug=False):
 
   # find puzzle area: axis-aligned big square
   contours = cv2.findContours(edges, cv2.RETR_EXTERNAL,
-                              cv2.CHAIN_APPROX_SIMPLE)[1]
+                               cv2.CHAIN_APPROX_SIMPLE)[0]
   squares = []
   for cnt in contours:
     # check contour size
