@@ -17,7 +17,8 @@ setup(
         'six',
         'matplotlib >= 2.0',
         'scikit-learn',
-        'python-opencv >= 3.2',
+        'joblib',
+        'opencv-python >= 3.2',
     ],
     scripts=['solve_picross.py'],
 )

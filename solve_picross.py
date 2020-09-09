@@ -76,7 +76,7 @@ def animate_solution(rows, cols, anim_secs=5, end_secs=1):
        cols=webarg('Column constraints.', default='3,2,5,(2,1),5'),
        image=webarg('Puzzle screenshot.', type=open))
 def web_main(state, rows='', cols='', image=None):
-  if image is None:
+  if not image:
     rows = parse_constraint(rows)
     cols = parse_constraint(cols)
   else:

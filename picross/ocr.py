@@ -1,8 +1,8 @@
 from __future__ import print_function, division
 import cv2
+import joblib
 import numpy as np
 import scipy.ndimage
-from sklearn.externals import joblib
 from sklearn.naive_bayes import GaussianNB
 
 
