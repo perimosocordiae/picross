@@ -3,7 +3,7 @@ import cv2
 import joblib
 import numpy as np
 import scipy.ndimage
-from sklearn.naive_bayes import GaussianNB
+from sklearn.naive_bayes import MultinomialNB
 
 
 class ConstraintsDetector(object):
@@ -22,7 +22,7 @@ class ConstraintsDetector(object):
 
   def detect_constraints(self, path_or_file):
     # crop to constraint areas
-    col_nums, row_nums = find_row_col_numbers(path_or_file)
+    col_nums, row_nums = find_row_col_numbers(path_or_file, debug=False)
 
     # segment rows/cols of constraints
     row_labels, _ = scipy.ndimage.label(row_nums.any(axis=1))
@@ -39,44 +39,35 @@ class ConstraintsDetector(object):
 
   def _parse_numbers(self, img, horiz=True):
     digit_labels, _ = scipy.ndimage.label(img)
+    digit_locs = scipy.ndimage.find_objects(digit_labels)
+    # sort the digit locations
+    if horiz:
+      # by column (left to right)
+      digit_locs.sort(key=lambda loc: loc[1].start)
+    else:
+      # by row (top to bottom)
+      digit_locs.sort(key=lambda loc: loc[0].start)
+
     numbers = []
-    in_2digit = False
-    for s1, s2 in scipy.ndimage.find_objects(digit_labels):
-      crop = img[s1,s2]
+    tmp_2digit = []
+    for loc in digit_locs:
+      crop = img[loc]
       if crop.size < 30 or min(crop.shape) < 4:
         continue
-      if horiz:
-        p1, p2 = s2.start, s1.start
-      else:
-        p1, p2 = s1.start, s2.start
       num_digits = crop.max()
       assert num_digits in (1, 2)  # sanity check
-      if in_2digit:
-        if not horiz:
-          p1 = numbers[-1][0]
-        in_2digit = False
-      elif num_digits == 2:
-        in_2digit = True
       digit = self.digit_rec.recognize(crop)
-      numbers.append((p1, p2, num_digits, digit))
-    if in_2digit:
-      raise Exception('Incomplete 2-digit number: %d' % numbers[-1][-1])
-    numbers.sort()
-
-    tmp = []
-    for _, __, num_digits, digit in numbers:
       if num_digits == 1:
-        in_2digit = False
-        tmp.append([digit])
-      elif in_2digit:
-        in_2digit = False
-        tmp[-1].append(digit)
+        assert not tmp_2digit, 'Incomplete 2-digit number: %s' % numbers
+        numbers.append([digit])
       else:
-        in_2digit = True
-        tmp.append([digit])
-    if in_2digit:
-      raise Exception('Incomplete 2-digit number: %s' % tmp)
-    return list(map(_digits2num, tmp))
+        tmp_2digit.append((loc[1].start, digit))
+        if len(tmp_2digit) == 2:
+          numbers.append([d for _, d in sorted(tmp_2digit)])
+          tmp_2digit = []
+
+    assert not tmp_2digit, 'Incomplete 2-digit number: %s' % numbers
+    return list(map(_digits2num, numbers))
 
 
 class DigitRecognizer(object):
@@ -102,7 +93,8 @@ class DigitRecognizer(object):
       print("Unknown digit: %.1f%% sure it's a %d (ent=%g)" % (
             100*odds, num, ent))
       _print_digit(img)
-      num = int(input("What is it? "))
+      num_str = input("What is it? ")
+      num = int(num_str) if num_str else num
       self._update_model(img, num)
 
     return num
@@ -135,7 +127,7 @@ class NaiveBayesDigits(DigitRecognizer):
   def train(known_images, known_digits):
     y = np.array(known_digits)
     X = np.array(known_images).reshape((len(y), -1))
-    clf = GaussianNB().partial_fit(X, y, classes=np.arange(10))
+    clf = MultinomialNB().partial_fit(X, y, classes=np.arange(10))
     return NaiveBayesDigits(clf)
 
   @staticmethod
@@ -219,53 +211,53 @@ def find_row_col_numbers(fpath, debug=False):
     # check if contour area matches bbox area
     x, y, w, h = cv2.boundingRect(cnt)
     bbox_area = w * h
-    if not (0.95 < cnt_area / bbox_area < 1.05):
+    if not (0.9 < cnt_area / bbox_area < 1.1):
       continue
     # check squareness
     if abs(w - h)/w > 0.01:
       continue
     squares.append((w, h, x, y))
 
+  if debug:
+    tmp = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
+    cnts = [cnt for cnt in contours if cv2.contourArea(cnt) >= 10000]
+    cv2.drawContours(tmp, cnts, -1, (0,0,255), 3)
+    cv2.imwrite('edges.png', tmp)
   if not squares:
-    if debug:
-      edges = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
-      cv2.drawContours(edges, contours, -1, (0,0,255), 3)
-      cv2.imwrite('out.png', edges)
-      raise Exception('No squares found in edge image: see out.png')
     raise Exception('No squares found in edge image')
+
+  if debug:
+    from itertools import cycle
+    from matplotlib import colors, rcParams
+    ccycle = cycle(rcParams['axes.prop_cycle'].by_key()['color'])
+    tmp = img.copy()
+    for (w, h, x, y), color in zip(squares, ccycle):
+      r, g, b = np.array(colors.to_rgb(color)) * 255
+      cv2.rectangle(tmp, (x, y), (x+w, y+h), (b, g, r), cv2.FILLED)
+    cv2.imwrite('squares.png', tmp)
 
   w, h, x, y = max(squares)
   if min(w, h) < min(edges.shape) / 2:
     # no single big square, but we could have many smaller ones
     squares = np.array(squares)
-    sum_area = squares[:,0].dot(squares[:,1])
     minx, miny = squares[:,2:].min(axis=0)
     maxx, maxy = (squares[:,:2] + squares[:,2:]).max(axis=0)
     bw, bh = maxx - minx, maxy - miny
-    bound_area = bw * bh
-    if 0.95 < sum_area / bound_area < 1.05:
-      w, h, x, y = bw, bh, minx, miny
-    else:
-      if debug:
-        from itertools import cycle
-        from matplotlib import colors, rcParams
-        ccycle = cycle(rcParams['axes.prop_cycle'].by_key()['color'])
-        for (w, h, x, y), color in zip(squares, ccycle):
-          r, g, b = np.array(colors.to_rgb(color)) * 255
-          cv2.rectangle(img, (x, y), (x+w, y+h), (b, g, r), cv2.FILLED)
-        cv2.imwrite('out.png', img)
-        raise Exception('No big square found in edge image: see out.png')
+    w, h, x, y = bw, bh, minx, miny
+  if min(w, h) < min(edges.shape) / 2:
       raise Exception('No big square found in edge image')
 
   col_nums = img[:y+1,x:x+w]
   row_nums = img[y:y+h,:x+1]
 
-  # cv2.imwrite('col_img.png', col_nums)
-  # cv2.imwrite('row_img.png', row_nums)
+  if debug:
+    cv2.imwrite('col_img.png', col_nums)
+    cv2.imwrite('row_img.png', row_nums)
   col_nums = _label_pixels(col_nums, vertical_gradient=False)
   row_nums = _label_pixels(row_nums, vertical_gradient=True)
-  # cv2.imwrite('col_lbl.png', col_nums * 127)
-  # cv2.imwrite('row_lbl.png', row_nums * 127)
+  if debug:
+    cv2.imwrite('col_lbl.png', col_nums * 127)
+    cv2.imwrite('row_lbl.png', row_nums * 127)
   return col_nums, row_nums
 
 
@@ -288,7 +280,9 @@ def _label_pixels(img, vertical_gradient=True):
   lbl[qsat < bg_sat] = 1
   lbl[qsat > bg_sat] = 2
 
-  # do a little cleanup: there should be background in each row and column
-  lbl -= lbl.min(axis=0, keepdims=True)
-  lbl -= lbl.min(axis=1, keepdims=True)
+  # do a little cleanup: there should be >10% background in each row and column
+  bad_cols = np.count_nonzero(lbl, axis=0) > (lbl.shape[0] * 0.9)
+  bad_rows = np.count_nonzero(lbl, axis=1) > (lbl.shape[1] * 0.9)
+  lbl[:, bad_cols] = 0
+  lbl[bad_rows, :] = 0
   return lbl
