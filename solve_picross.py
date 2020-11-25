@@ -1,5 +1,4 @@
-#!/usr/bin/env python
-from __future__ import print_function, division
+#!/usr/bin/env python3
 import ast
 import numpy as np
 from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
@@ -46,11 +45,11 @@ def cli_main(rows, cols, pre_parsed=False, animate=False):
   if animate:
     return animate_solution(rows, cols)
   soln = solve(rows, cols)
-  out = np.full_like(soln, '_', dtype=bytes)
+  out = np.full_like(soln, '_', dtype=str)
   out[soln == EMPTY] = ' '
   out[soln == FULL] = 'x'
   for row in out:
-    print(''.join(row))
+    print(*row, sep='')
 
 
 def animate_solution(rows, cols, anim_secs=5, end_secs=1):
