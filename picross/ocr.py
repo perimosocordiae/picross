@@ -31,10 +31,16 @@ class ConstraintsDetector(object):
     col_labels, _ = scipy.ndimage.label(flat_col)
 
     # parse constraints
-    row_constraints = [self._parse_numbers(row_nums[s[0],:], horiz=True)
-                       for s in scipy.ndimage.find_objects(row_labels)]
-    col_constraints = [self._parse_numbers(col_nums[:,s[0]], horiz=False)
-                       for s in scipy.ndimage.find_objects(col_labels)]
+    row_constraints = []
+    for s in scipy.ndimage.find_objects(row_labels):
+      nums = self._parse_numbers(row_nums[s[0],:], horiz=True)
+      if nums:
+        row_constraints.append(nums)
+    col_constraints = []
+    for s in scipy.ndimage.find_objects(col_labels):
+      nums = self._parse_numbers(col_nums[:,s[0]], horiz=False)
+      if nums:
+        col_constraints.append(nums)
     return row_constraints, col_constraints
 
   def _parse_numbers(self, img, horiz=True):
@@ -86,12 +92,10 @@ class DigitRecognizer(object):
     num = np.argmax(proba)
 
     # check that we have reasonable confidence
-    odds = proba[num] / max(1e-12, 1 - proba[num])
-    if odds < 0.99 or not np.isfinite(odds):
+    ent = scipy.stats.entropy(proba)
+    if ent > 0.02 or not np.isfinite(ent):
       print(proba)
-      ent = scipy.stats.entropy(proba)
-      print("Unknown digit: %.1f%% sure it's a %d (ent=%g)" % (
-            100*odds, num, ent))
+      print("Unknown digit: I think it's a %d (ent=%g)" % (num, ent))
       _print_digit(img)
       num_str = input("What is it? ")
       num = int(num_str) if num_str else num
@@ -199,65 +203,52 @@ def find_row_col_numbers(fpath, debug=False):
   # detect edges
   edges = cv2.Canny(gray, 50, 200, apertureSize=3)
 
+  # clean up edges via closing
+  kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3,3))
+  edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=3)
+  if debug:
+    cv2.imwrite('00-edges.png', edges)
+
+  # remove any non-axis-aligned edges
+  h, w = edges.shape
+  lines = cv2.HoughLines(edges, 1, np.pi / 4, int(min(h, w) * 0.75))
+  rho, theta = lines[:, 0].T
+  vert_xs = rho[theta < 0.1].astype(int)
+  horiz_ys = rho[theta > 1.5].astype(int)
+  mask = np.zeros_like(edges)
+  for x in vert_xs:
+      cv2.line(mask, (x, 0), (x, h), 255, 3)
+  for y in horiz_ys:
+      cv2.line(mask, (0, y), (w, y), 255, 3)
+  edges = cv2.bitwise_and(edges, mask)
+  if debug:
+    cv2.imwrite('01-axis_edges.png', edges)
+
   # find puzzle area: axis-aligned big square
-  contours = cv2.findContours(edges, cv2.RETR_EXTERNAL,
-                               cv2.CHAIN_APPROX_SIMPLE)[0]
-  squares = []
-  for cnt in contours:
-    # check contour size
-    cnt_area = cv2.contourArea(cnt)
-    if cnt_area < 10000:
-      continue
-    # check if contour area matches bbox area
-    x, y, w, h = cv2.boundingRect(cnt)
-    bbox_area = w * h
-    if not (0.9 < cnt_area / bbox_area < 1.1):
-      continue
-    # check squareness
-    if abs(w - h)/w > 0.01:
-      continue
-    squares.append((w, h, x, y))
-
+  padded = np.zeros((h + 2, w + 2), dtype=edges.dtype)
+  padded[1:-1, 1:-1] = edges
+  cv2.floodFill(padded, None, (0, 0), 255)
+  square = cv2.bitwise_not(padded[1:-1, 1:-1])
   if debug:
-    tmp = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
-    cnts = [cnt for cnt in contours if cv2.contourArea(cnt) >= 10000]
-    cv2.drawContours(tmp, cnts, -1, (0,0,255), 3)
-    cv2.imwrite('edges.png', tmp)
-  if not squares:
-    raise Exception('No squares found in edge image')
+    cv2.imwrite('02-square.png', square)
 
-  if debug:
-    from itertools import cycle
-    from matplotlib import colors, rcParams
-    ccycle = cycle(rcParams['axes.prop_cycle'].by_key()['color'])
-    tmp = img.copy()
-    for (w, h, x, y), color in zip(squares, ccycle):
-      r, g, b = np.array(colors.to_rgb(color)) * 255
-      cv2.rectangle(tmp, (x, y), (x+w, y+h), (b, g, r), cv2.FILLED)
-    cv2.imwrite('squares.png', tmp)
-
-  w, h, x, y = max(squares)
-  if min(w, h) < min(edges.shape) / 2:
-    # no single big square, but we could have many smaller ones
-    squares = np.array(squares)
-    minx, miny = squares[:,2:].min(axis=0)
-    maxx, maxy = (squares[:,:2] + squares[:,2:]).max(axis=0)
-    bw, bh = maxx - minx, maxy - miny
-    w, h, x, y = bw, bh, minx, miny
-  if min(w, h) < min(edges.shape) / 2:
-      raise Exception('No big square found in edge image')
+  # get the bounding box of the big square
+  contours = cv2.findContours(square, cv2.RETR_EXTERNAL,
+                              cv2.CHAIN_APPROX_SIMPLE)[0]
+  hull = cv2.convexHull(np.vstack(contours))
+  x, y, w, h = cv2.boundingRect(hull)
 
   col_nums = img[:y+1,x:x+w]
   row_nums = img[y:y+h,:x+1]
 
   if debug:
-    cv2.imwrite('col_img.png', col_nums)
-    cv2.imwrite('row_img.png', row_nums)
+    cv2.imwrite('03-col_img.png', col_nums)
+    cv2.imwrite('05-row_img.png', row_nums)
   col_nums = _label_pixels(col_nums, vertical_gradient=False)
   row_nums = _label_pixels(row_nums, vertical_gradient=True)
   if debug:
-    cv2.imwrite('col_lbl.png', col_nums * 127)
-    cv2.imwrite('row_lbl.png', row_nums * 127)
+    cv2.imwrite('04-col_lbl.png', col_nums * 127)
+    cv2.imwrite('06-row_lbl.png', row_nums * 127)
   return col_nums, row_nums
 
 
